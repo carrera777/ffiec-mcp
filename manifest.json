@@ -1,0 +1,146 @@
+{
+  "manifest_version": "0.4",
+  "name": "ffiec-cdr",
+  "display_name": "FFIEC CDR (Call Reports & UBPR)",
+  "version": "0.3.0",
+  "description": "Pull bank Call Report and UBPR data from the FFIEC CDR and Federal Reserve holding company filings (FR Y-9C, Y-9SP), look up item names, and export YTD-aware Excel workbooks.",
+  "long_description": "Exposes the FFIEC CDR Public Web Service (SIS611) as MCP tools: reporting periods, the Panel of Reporters (bank lookup by name, RSSD, FDIC cert), recent filers, parsed Call Report line items, headline bank summaries and multi-period trends, UBPR XBRL facts, and PDF/XBRL/SDF facsimile downloads. Item names from the Federal Reserve MDRM dictionary (bundled, refreshable). Excel export shows income statement items year-to-date as filed and as formula-derived discrete quarters. Reads only. Throttled to stay under the ~2,500 calls/hour limit, with files cached locally. Version 0.3 adds Federal Reserve holding company data from the NIC quarterly BHCF files (FR Y-9C consolidated, Y-9SP semiannual parent-only with consolidated assets): holding company search, headline summary with capital and asset quality ratios, multi-period trend with single-quarter derivation, raw MDRM items, and a file importer. The NIC download page blocks scripts, so quarterly files are downloaded in a browser and imported.",
+  "author": {
+    "name": "carrera777",
+    "url": "https://github.com/carrera777/ffiec-mcp"
+  },
+  "server": {
+    "type": "uv",
+    "entry_point": "src/server.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "${__dirname}/src/server.py"
+      ],
+      "env": {
+        "FFIEC_USER_ID": "${user_config.ffiec_user_id}",
+        "FFIEC_TOKEN": "${user_config.ffiec_token}",
+        "FFIEC_DOWNLOAD_DIR": "${user_config.download_dir}",
+        "FFIEC_FRY9_DIR": "${user_config.fry9_dir}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "ffiec_reporting_periods",
+      "description": "List available Call or UBPR reporting periods"
+    },
+    {
+      "name": "ffiec_find_bank",
+      "description": "Search the Panel of Reporters by name, ID, state, or city"
+    },
+    {
+      "name": "ffiec_recent_filers",
+      "description": "Banks that filed or amended since a given date"
+    },
+    {
+      "name": "ffiec_call_report",
+      "description": "Parsed Call Report line items for one bank and period"
+    },
+    {
+      "name": "ffiec_bank_summary",
+      "description": "Headline financials and capital ratios for one or more banks"
+    },
+    {
+      "name": "ffiec_bank_trend",
+      "description": "Multi-period time series of Call Report items for a bank"
+    },
+    {
+      "name": "ffiec_download_call_report",
+      "description": "Download a Call Report as PDF, XBRL, or SDF"
+    },
+    {
+      "name": "ffiec_ubpr",
+      "description": "UBPR XBRL facts for one bank and period"
+    },
+    {
+      "name": "ffiec_lookup_items",
+      "description": "Look up Call Report / UBPR item names by code or keyword"
+    },
+    {
+      "name": "ffiec_export_excel",
+      "description": "Export statements to Excel with YTD and derived discrete quarters"
+    },
+    {
+      "name": "fry9_status",
+      "description": "Which holding company (Y-9) quarterly files are loaded and how to add newer ones"
+    },
+    {
+      "name": "fry9_import_file",
+      "description": "Validate and import a downloaded NIC BHCF zip"
+    },
+    {
+      "name": "fry9_find",
+      "description": "Search Federal Reserve holding companies by name or state"
+    },
+    {
+      "name": "fry9_summary",
+      "description": "Headline Y-9C or Y-9SP filing for one holding company"
+    },
+    {
+      "name": "fry9_trend",
+      "description": "Multi-period holding company series with single-quarter derivation"
+    },
+    {
+      "name": "fry9_items",
+      "description": "Raw Y-9 line items by MDRM code or name search"
+    }
+  ],
+  "keywords": [
+    "ffiec",
+    "call report",
+    "ubpr",
+    "bank",
+    "fdic",
+    "regulatory",
+    "fr y-9c",
+    "holding company",
+    "federal reserve"
+  ],
+  "license": "MIT",
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": [
+      "win32",
+      "darwin",
+      "linux"
+    ],
+    "runtimes": {
+      "python": ">=3.10"
+    }
+  },
+  "user_config": {
+    "ffiec_user_id": {
+      "type": "string",
+      "title": "CDR PWS Username",
+      "description": "Your FFIEC CDR Public Web Service username (register at https://cdr.ffiec.gov/public/PWS/).",
+      "required": true
+    },
+    "ffiec_token": {
+      "type": "string",
+      "title": "CDR PWS Security Token",
+      "description": "Security token from your PWS account. Expires every 90 days; regenerate it in the PWS portal and update here.",
+      "sensitive": true,
+      "required": true
+    },
+    "download_dir": {
+      "type": "directory",
+      "title": "Download Folder",
+      "description": "Where downloaded facsimiles (PDF/XBRL/SDF) are saved and cached.",
+      "default": "${DOCUMENTS}/FFIEC",
+      "required": false
+    },
+    "fry9_dir": {
+      "type": "directory",
+      "title": "Holding Company Data Folder (optional)",
+      "description": "Folder holding the NIC BHCFYYYYMMDD.ZIP files for the Federal Reserve Y-9 tools. Leave blank to use the FRY9 folder inside the download folder.",
+      "required": false
+    }
+  }
+}

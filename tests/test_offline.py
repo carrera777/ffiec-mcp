@@ -7,7 +7,11 @@ import base64
 import json
 import os
 import sys
+import re
 import tempfile
+import time
+import zipfile
+from datetime import datetime
 from pathlib import Path
 
 TMP = Path(tempfile.mkdtemp(prefix="ffiec_test_"))
@@ -16,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import httpx  # noqa: E402
 import server  # noqa: E402
+from store import EASTERN  # noqa: E402
 
 server.MIN_INTERVAL = 0
 HEADER = '"Call Date";"Bank RSSD Identifier";"MDRM #";"Value";"Last Update";"Short Definition";"Call Schedule";"Line Number"\n'
@@ -40,6 +45,7 @@ XBRL = b'''<xbrl xmlns="http://www.xbrl.org/2003/instance" xmlns:uc="u">
 <uc:RIAD4150 contextRef="CI_1_2026-06-30" unitRef="NON-MONETARY" decimals="0">250</uc:RIAD4150>
 <uc:UBPR7204 contextRef="CI_1_2026-06-30" unitRef="PURE" decimals="2">0.11</uc:UBPR7204></xbrl>'''
 YTD = {"03/31/2026": (1000, 5000), "06/30/2026": (3000, 10500)}
+SUBMISSIONS = []  # extra RetrieveFilersSubmissionDateTime rows, to simulate amendments
 calls = []
 
 
@@ -54,7 +60,7 @@ def fake_get(url, headers, timeout, **kw):
         return J([{"ID_RSSD": 480228, "FDICCertNumber": 3510, "Name": "TEST BANK, NATIONAL ASSOCIATION    ",
                    "State": "NC", "City": "CHARLOTTE  ", "FilingType": "041", "HasFiledForReportingPeriod": True}])
     if m == "RetrieveFilersSubmissionDateTime":
-        return J([{"ID_RSSD": 1, "DateTime": "7/1/2026 6:17:33 PM"}, {"ID_RSSD": 2, "DateTime": "7/9/2026 11:42:45 AM"}])
+        return J(SUBMISSIONS + [{"ID_RSSD": 1, "DateTime": "7/1/2026 6:17:33 PM"}, {"ID_RSSD": 2, "DateTime": "7/9/2026 11:42:45 AM"}])
     if m == "RetrieveFacsimile":
         p = headers["reportingPeriodEndDate"]
         if headers["fiId"] == "999" or p not in YTD:
@@ -157,6 +163,114 @@ async def main():
     check("dir: relative -> Documents/FFIEC", server._resolve_dir("FFIEC") == docs / "FFIEC")
     check("dir: unknown variable -> default", server._resolve_dir("${FOO}/x") == docs / "FFIEC")
     check("dir: absolute kept", server._resolve_dir(str(TMP)) == TMP)
+
+    # ---- amendment detection
+    db = server._db()
+    period = "06/30/2026"
+    r = await call("ffiec_call_report", {"fi_id": "480228", "period": period, "items": ["RIAD4340"]})
+    check("cached before amendment", r["items"][0]["value"] == "3000", r)
+    YTD[period] = (3500, 10500)  # the bank amends its net income
+    stamp = datetime.fromtimestamp(time.time() + 3600, EASTERN).strftime("%-m/%-d/%Y %-I:%M:%S %p")
+    SUBMISSIONS.append({"ID_RSSD": 480228, "DateTime": stamp})
+    n = len(calls)
+    r = await call("ffiec_call_report", {"fi_id": "480228", "period": period, "items": ["RIAD4340"]})
+    check("amendment not seen before the check is due", r["items"][0]["value"] == "3000" and len(calls) == n, r)
+    db._w("UPDATE checks SET checked_at=? WHERE period=?", (time.time() - server.CHECK_TTL - 1, period))
+    n = len(calls)
+    r = await call("ffiec_call_report", {"fi_id": "480228", "period": period, "items": ["RIAD4340"]})
+    methods = [c[0] for c in calls[n:]]
+    check("amended filing re-downloaded", r["items"][0]["value"] == "3500", r)
+    check("amendment check costs one call", methods == ["RetrieveFilersSubmissionDateTime", "RetrieveFacsimile"], methods)
+    check("check sent period and a since-date", calls[n][1]["reportingPeriodEndDate"] == period
+          and re.fullmatch(r"\d\d/\d\d/\d{4}", calls[n][1]["lastUpdateDateTime"]), calls[n][1])
+    n = len(calls)
+    await call("ffiec_bank_summary", {"fi_ids": ["480228"], "period": period})
+    check("no calls once re-downloaded", len(calls) == n, [c[0] for c in calls[n:]])
+    SUBMISSIONS.clear()
+
+    # a failed check never blocks cached data, and backs off
+    db._w("UPDATE checks SET checked_at=? WHERE period=?", (time.time() - server.CHECK_TTL - 1, period))
+    real_get = server.httpx.get
+    server.httpx.get = lambda url, **kw: (calls.append((url.rsplit("/", 1)[1], kw["headers"])),
+                                          httpx.Response(500, text="down", request=httpx.Request("GET", url)))[1]
+    r = await call("ffiec_call_report", {"fi_id": "480228", "period": period, "items": ["RIAD4340"]})
+    n = len(calls)
+    await call("ffiec_call_report", {"fi_id": "480228", "period": period, "items": ["RIAD4340"]})
+    server.httpx.get = real_get
+    check("failed check still serves cache, then backs off", r["items"][0]["value"] == "3500" and len(calls) == n, r)
+
+    # files cached by v0.2.x (no catalog row) are adopted and covered by the next check
+    legacy = server._cache_path("03/31/2026", "480228", "ID_RSSD", "PDF")
+    legacy.write_bytes(b"%PDF-old")
+    os.utime(legacy, (datetime(2026, 2, 1).timestamp(),) * 2)
+    SUBMISSIONS.append({"ID_RSSD": 480228, "DateTime": "3/1/2026 9:00:00 AM"})
+    db._w("DELETE FROM checks")
+    await call("ffiec_download_call_report", {"fi_id": "480228", "period": "2026Q1"})
+    check("legacy file amended since its mtime is refreshed", legacy.read_bytes() == b"%PDF-1.4", legacy.read_bytes()[:10])
+    SUBMISSIONS.clear()
+
+    # ---- lookups survive a restart
+    server._panel_cache.clear()
+    n = len(calls)
+    r = await call("ffiec_find_bank", {"query": "test bank"})
+    await call("ffiec_reporting_periods", {})
+    check("panel and periods persisted across restart", r["matches"] == 1 and len(calls) == n, [c[0] for c in calls[n:]])
+    r = await call("ffiec_reporting_periods", {"refresh": True})
+    check("refresh bypasses persisted periods", calls[-1][0] == "RetrieveReportingPeriods", calls[-1][0])
+
+    # ---- bulk import
+    bulk = TMP / "FFIEC CDR Call Bulk All Schedules 09302025.zip"
+    por = ("IDRSSD\tFDIC Certificate Number\tOCC Charter Number\tOTS Docket Number\tPrimary ABA Routing Number\t"
+           "Financial Institution Name\tFinancial Institution City\tFinancial Institution State\t"
+           "Financial Institution Filing Type\tLast Date/Time Submission Updated On\n"
+           "777\t4444\t0\t0\t0\tBULK BANK\tAUSTIN\tTX\t051\t2025-10-20T10:00:00\n"
+           "888\t5555\t0\t0\t0\tOTHER BANK\tDALLAS\tTX\t041\t2025-10-21T10:00:00\n")
+    rc = ('"IDRSSD"\t"RCON2170"\t"RCON2200"\t"RCON3210"\n'
+          '""\t"TOTAL ASSETS"\t"TOTAL DEPOSITS"\t"TOTAL EQUITY"\n'
+          '777\t500000\t400000\t50000\n888\t900000\t\t90000\n')
+    ri = ("IDRSSD\tRIAD4340\tRIAD4074\tRCON2170\n\tNET INCOME\tNII\tdup\n777\t4200\t15000\t500000\n888\t7000\t\t900000\n")
+    with zipfile.ZipFile(bulk, "w") as z:
+        z.writestr("FFIEC CDR Call Bulk POR 09302025.txt", por)
+        z.writestr("FFIEC CDR Call Schedule RC 09302025.txt", rc)
+        z.writestr("FFIEC CDR Call Schedule RI 09302025(1 of 2).txt", ri)
+        z.writestr("Readme.txt", "notes")
+    server.TIME_BUDGET = 0
+    statuses = []
+    for _ in range(6):
+        r = await call("ffiec_import_bulk", {"path": str(bulk)})
+        statuses.append(r.get("status"))
+        if r.get("status") != "in_progress":
+            break
+    server.TIME_BUDGET = 40
+    check("bulk import resumes then completes", statuses[0] == "in_progress" and statuses[-1] == "complete"
+          and r["periods"] == {"09/30/2025": 2}, (statuses, r))
+    n = len(calls)
+    r = await call("ffiec_call_report", {"fi_id": "777", "period": "2025Q3"})
+    vals = {i["mdrm"]: (i["value"], i["schedule"]) for i in r["items"]}
+    check("bulk bank served locally (only the first amendment check)", r["source"] == "bulk import"
+          and [c[0] for c in calls[n:]] == ["RetrieveFilersSubmissionDateTime"], [c[0] for c in calls[n:]])
+    n = len(calls)
+    check("bulk values, schedules, duplicate kept once", vals.get("RIAD4340") == ("4200", "RI")
+          and vals.get("RCON2170") == ("500000", "RC") and len(vals) == 5, vals)
+    r = await call("ffiec_bank_summary", {"fi_ids": ["888"], "period": "2025Q3"})
+    check("summary from bulk (blank cells skipped)", r["banks"]["888"]["total_assets"] == 900000
+          and r["banks"]["888"]["total_deposits"] is None, r)
+    r = await call("ffiec_call_report", {"fi_id": "4444", "period": "2025Q3", "id_type": "FDICCertNumber", "items": ["2170"]})
+    check("bulk found by FDIC cert via imported panel", r.get("source") == "bulk import" and len(calls) == n, r)
+    r = await call("ffiec_cache_status", {})
+    check("cache status lists bulk import", r["periods"]["09/30/2025"]["bulk_banks"] == 2 and r["bulk_imports"], r)
+    check("staging database removed", not (TMP / ".ffiec_cache" / "bulk_stage.sqlite").exists())
+
+    # an amendment after the bulk snapshot sends that bank back to the API
+    YTD["09/30/2025"] = (3100, 15000)
+    SUBMISSIONS.append({"ID_RSSD": 777, "DateTime": "11/2/2025 1:00:00 PM"})
+    db._w("DELETE FROM checks WHERE period='09/30/2025'")
+    n = len(calls)
+    r = await call("ffiec_call_report", {"fi_id": "777", "period": "2025Q3", "items": ["RIAD4340"]})
+    check("amended bulk bank re-fetched from API", r["source"] != "bulk import" and r["items"][0]["value"] == "3100", r)
+    r = await call("ffiec_call_report", {"fi_id": "888", "period": "2025Q3", "items": ["RIAD4340"]})
+    check("unamended bulk bank still local", r["source"] == "bulk import", r)
+    SUBMISSIONS.clear()
 
     h = calls[0][1]
     check("auth headers", h["Authentication"] == "Bearer test-token" and h["UserID"] == "tester", h)

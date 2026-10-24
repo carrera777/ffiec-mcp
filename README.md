@@ -27,6 +27,8 @@ It is read-only. It never files or submits anything.
 | `ffiec_ubpr` | UBPR data points with plain-English names |
 | `ffiec_lookup_items` | Look up item names by code, or codes by name (understands ROA, ROE, NIM, NCO, NPL, CET1) |
 | `ffiec_export_excel` | Formatted Excel workbook with year-to-date and discrete-quarter income statements |
+| `ffiec_import_bulk` | Load every bank's Call Report for a quarter from an FFIEC bulk-download ZIP, with no API calls |
+| `ffiec_cache_status` | What is stored locally, what is stale, and when each quarter was last checked for amendments |
 
 ## Federal Reserve holding company filings (FR Y-9C and Y-9SP)
 
@@ -109,7 +111,25 @@ Optional extras: per-bank Detail sheets for any schedule (each row flagged YTD o
 | An export or trend returns `status: in_progress` | Normal for big requests. Claude calls the tool again automatically; downloads are cached, so each call picks up where the last stopped. If Claude stops, say "continue the export". |
 | Extension fails to start | Check the log: Settings > Developer (or on Windows `%LOCALAPPDATA%\Claude\Logs\mcp-server-FFIEC CDR (Call Reports & UBPR).log`) and send it to the maintainer. |
 
-Large exports download in stages of about 40 seconds so Claude Desktop does not time out; each stage resumes from the cache. A 3-bank, 4-quarter export with detail and UBPR is about 30 filings. The extension tracks FFIEC's hourly limit (about 2,500 calls) and pauses before hitting it. Downloaded filings are cached in the download folder, so repeat requests are fast and free.
+Large exports download in stages of about 40 seconds so Claude Desktop does not time out; each stage resumes from the cache. A 3-bank, 4-quarter export with detail and UBPR is about 30 filings. The extension tracks FFIEC's hourly limit (about 2,500 calls) and pauses before hitting it. Downloaded filings are cached in the download folder, so repeat requests are fast and free; amended filings are detected and downloaded again (see "Local cache and amended filings").
+
+## Local cache and amended filings
+
+Everything the extension downloads stays on your machine: filings in the download folder, plus a small database at `<download folder>/.ffiec_cache/cache.sqlite` that records what was fetched and when. Nothing is shared or uploaded. The database also keeps the bank list and reporting periods, so restarting Claude Desktop does not fetch them again.
+
+Banks amend Call Reports after filing. Once a day per quarter, the first time you use cached data for that quarter, the extension makes one API call asking FFIEC which banks filed or amended since your copy was downloaded. Any older copy is marked stale and downloaded again the next time you ask for it. If that check fails (network, token, hourly limit), cached data is still served and the check is retried an hour later. To change the interval, set the environment variable `FFIEC_CHECK_HOURS` (default 24).
+
+Ask "show the FFIEC cache status" to see what is stored.
+
+## Loading a whole quarter at once (bulk download)
+
+For peer work across many banks, load a whole quarter from FFIEC's bulk file instead of calling the API bank by bank:
+
+1. Go to https://cdr.ffiec.gov/public/PWS/DownloadBulkData.aspx.
+2. Choose **Call Reports -- Single Period**, the quarter, and **Tab Delimited**, then download the ZIP.
+3. Ask Claude: "Import the FFIEC bulk file at C:\Users\me\Downloads\FFIEC CDR Call Bulk All Schedules 06302025.zip".
+
+A quarter takes a minute or two over a few tool calls, and adds roughly 30 to 80 MB to the database. After that, Call Report tools, summaries, trends, and Excel exports read those banks locally. The amendment check above covers bulk-loaded banks too. Line numbers are blank for bulk-loaded items, and Detail sheets still download one XBRL file per bank for the YTD/period-end flags. UBPR data is not included in the bulk import; it still comes from the API.
 
 ## Data sources
 
@@ -128,8 +148,12 @@ Created and maintained by [carrera777](https://github.com/carrera777/ffiec-mcp).
 manifest.json          Extension manifest (version, settings, tool list)
 src/server.py          MCP server: FFIEC API client and tools
 src/excel_export.py    Excel workbook builder
+src/store.py           Local SQLite cache: filing catalog, amendment checks, persisted lookups, bulk import
+src/fry9.py            Holding company (FR Y-9) reader for NIC BHCF files
 src/mdrm_labels.json.gz  Bundled MDRM item names
+src/bhc_labels.json.gz   Bundled holding company item names
 tests/test_offline.py  Offline tests with a mocked FFIEC API
+tests/test_fry9.py     Holding company tests
 build.py               Packages dist/ffiec.mcpb
 ```
 
@@ -137,6 +161,7 @@ Run the tests (requires Python 3.10+ with `mcp<2`, `httpx`, `openpyxl`):
 
 ```bash
 python tests/test_offline.py
+python tests/test_fry9.py
 ```
 
 Build the bundle:

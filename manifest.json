@@ -2,9 +2,9 @@
   "manifest_version": "0.4",
   "name": "ffiec-cdr",
   "display_name": "FFIEC CDR (Call Reports & UBPR)",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Pull bank Call Report and UBPR data from the FFIEC CDR and Federal Reserve holding company filings (FR Y-9C, Y-9SP), look up item names, and export YTD-aware Excel workbooks.",
-  "long_description": "Exposes the FFIEC CDR Public Web Service (SIS611) as MCP tools: reporting periods, the Panel of Reporters (bank lookup by name, RSSD, FDIC cert), recent filers, parsed Call Report line items, headline bank summaries and multi-period trends, UBPR XBRL facts, and PDF/XBRL/SDF facsimile downloads. Item names from the Federal Reserve MDRM dictionary (bundled, refreshable). Excel export shows income statement items year-to-date as filed and as formula-derived discrete quarters. Reads only. Throttled to stay under the ~2,500 calls/hour limit, with files cached locally. Version 0.3 adds Federal Reserve holding company data from the NIC quarterly BHCF files (FR Y-9C consolidated, Y-9SP semiannual parent-only with consolidated assets): holding company search, headline summary with capital and asset quality ratios, multi-period trend with single-quarter derivation, raw MDRM items, and a file importer. The NIC download page blocks scripts, so quarterly files are downloaded in a browser and imported.",
+  "long_description": "Exposes the FFIEC CDR Public Web Service (SIS611) as MCP tools: reporting periods, the Panel of Reporters (bank lookup by name, RSSD, FDIC cert), recent filers, parsed Call Report line items, headline bank summaries and multi-period trends, UBPR XBRL facts, and PDF/XBRL/SDF facsimile downloads. Item names from the Federal Reserve MDRM dictionary (bundled, refreshable). Excel export shows income statement items year-to-date as filed and as formula-derived discrete quarters. Reads only. Throttled to stay under the ~2,500 calls/hour limit, with files cached locally. Downloads are cached in a local SQLite database that detects amended filings and re-downloads them, and whole quarters of Call Reports can be loaded from FFIEC bulk-download files with no API calls. Version 0.3 adds Federal Reserve holding company data from the NIC quarterly BHCF files (FR Y-9C consolidated, Y-9SP semiannual parent-only with consolidated assets): holding company search, headline summary with capital and asset quality ratios, multi-period trend with single-quarter derivation, raw MDRM items, and a file importer. The NIC download page blocks scripts, so quarterly files are downloaded in a browser and imported.",
   "author": {
     "name": "carrera777",
     "url": "https://github.com/carrera777/ffiec-mcp"
@@ -90,6 +90,14 @@
     {
       "name": "fry9_items",
       "description": "Raw Y-9 line items by MDRM code or name search"
+    },
+    {
+      "name": "ffiec_import_bulk",
+      "description": "Load every bank's Call Report for a quarter from an FFIEC bulk-download ZIP"
+    },
+    {
+      "name": "ffiec_cache_status",
+      "description": "Show locally cached and bulk-imported data and amendment checks"
     }
   ],
   "keywords": [

@@ -32,6 +32,8 @@ from typing import Any, Literal
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+import store
+
 BASE_URL = "https://ffieccdr.azure-api.us/public/"
 USER_ID = os.environ.get("FFIEC_USER_ID", "").strip()
 TOKEN = re.sub(r"^\s*Bearer\s+", "", os.environ.get("FFIEC_TOKEN", "")).strip()
@@ -69,14 +71,19 @@ DOWNLOAD_DIR = _resolve_dir(os.environ.get("FFIEC_DOWNLOAD_DIR"))
 HOURLY_LIMIT = 2400      # SIS611 3.1: about 2,500 calls/hour; keep a margin
 MIN_INTERVAL = 0.2       # small courtesy gap between calls
 TIME_BUDGET = float(os.environ.get("FFIEC_TIME_BUDGET", "40"))  # seconds per tool call before pausing
+CHECK_TTL = float(os.environ.get("FFIEC_CHECK_HOURS", "24")) * 3600  # how often to look for amended filings
+PERIODS_TTL = 6 * 3600     # reporting-period lists
+PANEL_TTL = 24 * 3600      # Panel of Reporters
+MISSING_TTL = 24 * 3600    # "not found" results (UBPR is published weeks after the Call Report)
 
 IdType = Literal["ID_RSSD", "FDICCertNumber", "OCCChartNumber", "OTSDockNumber"]
 
 mcp = FastMCP("ffiec")
 _last_call = 0.0
 _call_times: list[float] = []
-_missing: dict[str, str] = {}  # cache path -> reason, so resumed calls skip filings that do not exist
 _panel_cache: dict[str, list[dict]] = {}
+_store: store.Store | None = None
+_rssd_memo: dict[tuple[str, str], str] = {}
 _labels: dict[str, str] | None = None
 LABELS_BUNDLED = Path(__file__).with_name("mdrm_labels.json.gz")
 MDRM_URL = "https://www.federalreserve.gov/apps/mdrm/pdf/MDRM.zip"
@@ -263,19 +270,86 @@ def _cache_path(period: str, fi_id: str, id_type: str, fmt: str) -> Path:
     return DOWNLOAD_DIR / f"{tag}_{id_type}_{fi_id}_{ymd}.{ext}"
 
 
-def _is_ready(period: str, fi_id: str, id_type: str, fmt: str) -> bool:
-    """True if the filing is cached on disk or already known not to exist (no API call needed)."""
+def _db() -> store.Store:
+    global _store
+    if _store is None:
+        _store = store.Store(DOWNLOAD_DIR / ".ffiec_cache" / "cache.sqlite")
+    return _store
+
+
+def _rssd_for(fi_id: str, id_type: str) -> str | None:
+    """The bank's ID_RSSD, from cached panels only (never an API call); None if unknown."""
+    if id_type == "ID_RSSD":
+        return str(fi_id).strip()
+    key = (id_type, str(fi_id).strip())
+    if key not in _rssd_memo:
+        for panel in [*_panel_cache.values(), *_db().panels()]:
+            hit = next((b for b in panel if str(b.get(id_type)) == key[1]), None)
+            if hit:
+                _rssd_memo[key] = str(hit.get("ID_RSSD"))
+                break
+    return _rssd_memo.get(key)
+
+
+def _sync_period(period: str) -> None:
+    """Drop cached copies of filings that were amended after we downloaded them.
+
+    At most once per CHECK_TTL per period, and only if something for the period is cached, ask FFIEC which
+    banks filed or amended since our oldest cached copy (one API call). Copies older than their bank's latest
+    submission are marked stale and re-downloaded on next use. A failed check never blocks cached data.
+    """
+    db = _db()
+    since = db.check_since(period, CHECK_TTL)
+    if since is None:
+        return
+    try:
+        day = datetime.fromtimestamp(since - 86400, store.EASTERN).strftime("%m/%d/%Y")
+        rows = _json(_call("RetrieveFilersSubmissionDateTime", dataSeries="Call",
+                           reportingPeriodEndDate=period, lastUpdateDateTime=day))
+    except Exception:
+        db.check_done(period, failed=True)
+        return
+    submitted = {}
+    for r in rows if isinstance(rows, list) else []:
+        t = store.eastern_ts(r.get("DateTime"))
+        if t:
+            submitted[str(r.get("ID_RSSD"))] = t
+    db.invalidate(period, submitted)
+    db.check_done(period)
+
+
+def _cached(period: str, fi_id: str, id_type: str, fmt: str) -> Path | None:
+    """The cached file for this filing if it exists and has not been superseded by an amendment."""
     path = _cache_path(period, fi_id, id_type, fmt)
-    return path.exists() or str(path) in _missing
+    rssd = _rssd_for(fi_id, id_type)
+    if path.exists():
+        _db().is_fresh(path, period, fi_id, id_type, fmt, rssd)  # registers files cached by older versions
+    _sync_period(period)
+    return path if _db().is_fresh(path, period, fi_id, id_type, fmt, rssd) else None
+
+
+def _is_ready(period: str, fi_id: str, id_type: str, fmt: str) -> bool:
+    """True if the filing is available without an API call: cached on disk, imported from a bulk file,
+    or already known not to exist."""
+    period = _norm_date(period)
+    if _cached(period, fi_id, id_type, fmt):
+        return True
+    rssd = _rssd_for(fi_id, id_type)
+    if fmt == "SDF" and rssd and _db().has_bulk(period, rssd):
+        return True
+    return _db().missing(_cache_path(period, fi_id, id_type, fmt), MISSING_TTL) is not None
 
 
 def _fetch_facsimile(period: str, fi_id: str, id_type: str, fmt: str, refresh: bool = False) -> Path:
     period = _norm_date(period)
     path = _cache_path(period, fi_id, id_type, fmt)
-    if path.exists() and not refresh:
-        return path
-    if str(path) in _missing and not refresh:
-        raise FFIECError(_missing[str(path)])
+    rssd = _rssd_for(fi_id, id_type)
+    if not refresh:
+        if _cached(period, fi_id, id_type, fmt):
+            return path
+        reason = _db().missing(path, MISSING_TTL)
+        if reason:
+            raise FFIECError(reason)
     try:
         if fmt == "UBPR":
             r = _call("RetrieveUBPRXBRLFacsimile", reportingPeriodEndDate=period, fiIdType=id_type, fiId=str(fi_id))
@@ -284,25 +358,66 @@ def _fetch_facsimile(period: str, fi_id: str, id_type: str, fmt: str, refresh: b
                       fiIdType=id_type, fiId=str(fi_id), facsimileFormat=fmt)
     except FFIECError as e:
         if "No content" in str(e) or "not found" in str(e).lower():
-            _missing[str(path)] = str(e)
+            _db().set_missing(path, period, rssd, str(e))
         raise
     data = _decode_file(r)
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+    _db().record(path, period, fi_id, id_type, fmt, rssd)
     return path
+
+
+def _call_rows(period: str, fi_id: str, id_type: str, refresh: bool = False) -> tuple[list[dict], str]:
+    """A bank's Call Report line items for one period and where they came from.
+
+    Order: a current cached SDF file, then a bulk import, then the API. Returns (rows, source), where
+    source is the SDF file path or "bulk import".
+    """
+    period = _norm_date(period)
+    if not refresh and not _cached(period, fi_id, id_type, "SDF"):
+        rssd = _rssd_for(fi_id, id_type)
+        bulk = _db().bulk_rows(period, rssd) if rssd else None
+        if bulk:
+            return [{"mdrm": c, "value": v, "description": _label(c) or "", "schedule": sch, "line": ""}
+                    for c, v, sch in bulk], "bulk import"
+    path = _fetch_facsimile(period, fi_id, id_type, "SDF", refresh)
+    return _parse_sdf(path.read_text(encoding="utf-8-sig", errors="replace")), str(path)
 
 
 def _panel(period: str, refresh: bool = False) -> list[dict]:
     period = _norm_date(period)
     if refresh or period not in _panel_cache:
-        rows = _json(_call("RetrievePanelOfReporters", dataSeries="Call", reportingPeriodEndDate=period))
-        _panel_cache[period] = [{k: v.strip() if isinstance(v, str) else v for k, v in b.items()} for b in rows]
+        rows = None if refresh else _db().lookup("panel:" + period, PANEL_TTL)
+        if rows is None:
+            try:
+                rows = _json(_call("RetrievePanelOfReporters", dataSeries="Call", reportingPeriodEndDate=period))
+            except Exception:
+                rows = _db().bulk_panel(period)  # e.g. hourly limit reached: fall back to an imported panel
+                if rows is None:
+                    raise
+            else:
+                rows = [{k: v.strip() if isinstance(v, str) else v for k, v in b.items()} for b in rows]
+                _db().put_lookup("panel:" + period, rows)
+        _panel_cache[period] = rows
     return _panel_cache[period]
 
 
+def _periods(series: str = "Call", refresh: bool = False) -> list[str]:
+    """Reporting periods, newest first (MM/DD/YYYY), cached for a few hours."""
+    key = "periods:" + series
+    periods = None if refresh else _db().lookup(key, PERIODS_TTL)
+    if periods is None:
+        if series == "UBPR":
+            raw = _json(_call("RetrieveUBPRReportingPeriods"))
+        else:
+            raw = _json(_call("RetrieveReportingPeriods", dataSeries="Call"))
+        periods = [_norm_date(p) for p in sorted(raw, key=_date_key, reverse=True)]
+        _db().put_lookup(key, periods)
+    return periods
+
+
 def _latest_period() -> str:
-    periods = _json(_call("RetrieveReportingPeriods", dataSeries="Call"))
-    return _norm_date(max(periods, key=_date_key))
+    return _periods("Call")[0]
 
 
 def _label_cache_path() -> Path:
@@ -366,18 +481,14 @@ def _err(e: Exception) -> dict:
 # ---------------------------------------------------------------- tools
 
 @mcp.tool()
-def ffiec_reporting_periods(series: Literal["Call", "UBPR"] = "Call") -> dict:
+def ffiec_reporting_periods(series: Literal["Call", "UBPR"] = "Call", refresh: bool = False) -> dict:
     """List reporting period end dates available in the FFIEC CDR.
 
     series: "Call" for Call Reports (FFIEC 031/041/051) or "UBPR" for Uniform Bank Performance Reports.
-    Returns dates newest first (MM/DD/YYYY).
+    Returns dates newest first (MM/DD/YYYY). Cached for 6 hours; refresh=True asks FFIEC now.
     """
     try:
-        if series == "UBPR":
-            periods = _json(_call("RetrieveUBPRReportingPeriods"))
-        else:
-            periods = _json(_call("RetrieveReportingPeriods", dataSeries="Call"))
-        periods = [_norm_date(p) for p in sorted(periods, key=_date_key, reverse=True)]
+        periods = _periods(series, refresh)
         return {"series": series, "count": len(periods), "latest": periods[0] if periods else None,
                 "periods": periods}
     except Exception as e:
@@ -452,16 +563,16 @@ def ffiec_call_report(fi_id: str, period: str, id_type: IdType = "ID_RSSD",
       like "2170" matches any prefix (RCFD/RCON/RIAD...).
     schedule: filter to one schedule, e.g. "RC", "RI", "RC-C part I" / "RCCI", "RCRII" (hyphens optional).
     search: substring filter across code/description, e.g. "deposits".
-    Dollar amounts are in thousands of USD. The raw file is cached in the download folder.
+    Dollar amounts are in thousands of USD. The raw file is cached in the download folder; banks loaded
+    with ffiec_import_bulk are served from the local database (source "bulk import", no line numbers).
     """
     try:
-        path = _fetch_facsimile(period, fi_id, id_type, "SDF", refresh)
-        rows = _parse_sdf(path.read_text(encoding="utf-8-sig", errors="replace"))
+        rows, source = _call_rows(period, fi_id, id_type, refresh)
         hits = _filter_items(rows, "mdrm", items, search, schedule)
         schedules = sorted({r["schedule"] for r in rows if r["schedule"]})
         return {"fi_id": fi_id, "id_type": id_type, "period": _norm_date(period), "units": "USD thousands",
                 "total_items": len(rows), "matched": len(hits), "returned": min(len(hits), limit),
-                "schedules": schedules, "file": str(path), "items": hits[:limit]}
+                "schedules": schedules, "source": source, "items": hits[:limit]}
     except Exception as e:
         return _err(e)
 
@@ -488,8 +599,7 @@ KEY_ITEMS = {
 
 
 def _summary(fi_id: str, period: str, id_type: str) -> dict:
-    path = _fetch_facsimile(period, fi_id, id_type, "SDF")
-    by_code = {r["mdrm"].upper(): r["value"] for r in _parse_sdf(path.read_text(encoding="utf-8-sig", errors="replace"))}
+    by_code = {r["mdrm"].upper(): r["value"] for r in _call_rows(period, fi_id, id_type)[0]}
     out: dict[str, Any] = {}
     for label, codes in KEY_ITEMS.items():
         for c in codes:
@@ -553,9 +663,7 @@ def ffiec_bank_trend(fi_id: str, periods: list[str], items: list[str] | None = N
                         "next_step": "Call ffiec_bank_trend again with the same arguments; fetched periods are cached."}
             try:
                 if items:
-                    path = _fetch_facsimile(pd, fi_id, id_type, "SDF")
-                    rows = _filter_items(_parse_sdf(path.read_text(encoding="utf-8-sig", errors="replace")),
-                                         "mdrm", items, None)
+                    rows = _filter_items(_call_rows(pd, fi_id, id_type)[0], "mdrm", items, None)
                     series[pd] = {r["mdrm"]: _num(r["value"]) if _num(r["value"]) is not None else r["value"]
                                   for r in rows}
                 else:
@@ -771,8 +879,7 @@ def ffiec_export_excel(fi_ids: list[str], start: str | None = None, end: str | N
                     "state": pb.get("State"), "periods": {}, "desc": {}, "missing": {}}
             for p in columns:
                 try:
-                    path = _fetch_facsimile(p, fid, id_type, "SDF")
-                    rows = _parse_sdf(path.read_text(encoding="utf-8-sig", errors="replace"))
+                    rows = _call_rows(p, fid, id_type)[0]
                     bank["periods"][p] = {r["mdrm"].upper(): r["value"] for r in rows}
                     for r in rows:
                         bank["desc"][r["mdrm"].upper()] = (r["description"], r["schedule"], r["line"])
@@ -1032,6 +1139,42 @@ def fry9_items(holding_company: str, period: str | None = None, codes: list[str]
         items.sort(key=lambda x: x["code"])
         return {"entity": fry9.entity(row), "period": fry9.fmt_period(p), "count": len(items), "items": items[:limit],
                 "truncated": len(items) > limit, "notes": "Dollars in thousands; income items are year to date."}
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def ffiec_import_bulk(path: str) -> dict:
+    """Load a whole quarter of Call Reports (every bank) from an FFIEC bulk-download file, using no API calls.
+
+    path: the ZIP downloaded from https://cdr.ffiec.gov/public/PWS/DownloadBulkData.aspx with
+      Available Products = "Call Reports -- Single Period" and Format = "Tab Delimited" (or the folder it
+      was extracted to). One ZIP per quarter; import as many quarters as you like.
+    Afterwards ffiec_call_report, ffiec_bank_summary, ffiec_bank_trend and ffiec_export_excel read those
+    banks from the local database instead of calling FFIEC. Amended filings are still detected and
+    re-downloaded. A full quarter takes a minute or more: if the result has status "in_progress", call
+    again with the same path until status is "complete".
+    """
+    try:
+        src = Path(os.path.expanduser(path.strip().strip('"')))
+        if not src.exists():
+            return {"error": f"Not found: {src}. Download the ZIP first (see this tool's description)."}
+        return store.import_bulk(_db(), src, TIME_BUDGET)
+    except Exception as e:
+        return _err(e)
+
+
+@mcp.tool()
+def ffiec_cache_status() -> dict:
+    """What is stored locally: cached filings and bulk-imported banks per period, stale copies awaiting
+    re-download, and when each period was last checked for amended filings. Costs no API calls."""
+    try:
+        out = _db().status()
+        now = time.monotonic()
+        out["api_calls_last_hour"] = sum(1 for t in _call_times if now - t < 3600)
+        out["hourly_limit"] = HOURLY_LIMIT
+        out["amendment_check_hours"] = CHECK_TTL / 3600
+        return out
     except Exception as e:
         return _err(e)
 

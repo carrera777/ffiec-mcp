@@ -4,7 +4,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-FILES = ["manifest.json", "src/server.py", "src/excel_export.py", "src/mdrm_labels.json.gz", "src/fry9.py", "src/bhc_labels.json.gz"]
+FILES = ["manifest.json", "src/server.py", "src/excel_export.py", "src/store.py", "src/mdrm_labels.json.gz", "src/fry9.py", "src/bhc_labels.json.gz"]
 
 
 def main() -> None:

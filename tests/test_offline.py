@@ -273,6 +273,53 @@ async def main():
     check("unamended bulk bank still local", r["source"] == "bulk import", r)
     SUBMISSIONS.clear()
 
+    # real-file layout (06/30/2026 bulk ZIP), made-up values: quoted "IDRSSD" only in the POR header,
+    # trailing empty column, blank first cell on the description row, "(1 of 4)" with no space before it
+    bulk = TMP / "FFIEC CDR Call Bulk All Schedules 03312026.zip"
+    por = ('"IDRSSD"\tFDIC Certificate Number\tOCC Charter Number\tOTS Docket Number\tPrimary ABA Routing Number\t'
+           "Financial Institution Name\tFinancial Institution Address\tFinancial Institution City\t"
+           "Financial Institution State\tFinancial Institution Zip Code\tFinancial Institution Filing Type\t"
+           "Last Date/Time Submission Updated On\n"
+           "901\t7001\t0\t0\t61100001\tREAL SHAPE BANK\t1 MAIN STREET \tSPARTA\tGA\t31087\t041\t2026-04-15T14:15:36\n"
+           "902\t7002\t24\t0\t21000021\tBIG SHAPE BANK, N.A.\t2 WALL ST\tCOLUMBUS\tOH\t43240\t031\t2026-04-30T09:01:02\n")
+    files = {
+        "FFIEC CDR Call Bulk POR 03312026.txt": por,
+        "FFIEC CDR Call Schedule RC 03312026.txt":
+            "IDRSSD\tRCFD2170\tRCON2170\tRCON2200\t\n\tTOTAL ASSETS\tTOTAL ASSETS\tTOTAL DEPOSITS\t\n"
+            "901\t\t85000\t71000\t\n902\t3900000\t\t2500000\t\n",
+        "FFIEC CDR Call Schedule RCRII 03312026(1 of 4).txt":
+            "IDRSSD\tRCFD2170\tRCON2170\t\n\tTOTAL ASSETS\tTOTAL ASSETS\t\n901\t\t85000\t\n902\t3900000\t\t\n",
+        "FFIEC CDR Call Schedule RI 03312026.txt":
+            "IDRSSD\tRIAD4340\tRIAD4010\t\n\tNET INCOME (LOSS)\tINTEREST AND FEES ON LOANS\t\n901\t190\t820\t\n902\t15000\t40000\t\n",
+        "FFIEC CDR Call Schedule RIA 03312026.txt":
+            "IDRSSD\tRIAD3210\tRIAD4340\t\n\tTOTAL EQUITY CAPITAL\tNET INCOME\t\n901\t13000\t190\t\n902\t300000\t15000\t\n",
+        "FFIEC CDR Call Schedule NARR 03312026.txt":
+            "IDRSSD\tRCON6979\tTEXT6980\t\n\tNO COMMENT-BK MANAGEMENT STATE\tBANK MANAGEMENT STATEMENT\t\n"
+            "901\tfalse\t\t\n902\ttrue\tNo comment.\t\n",
+        "FFIEC CDR Call Schedule CI 03312026.txt":
+            "IDRSSD\tTEXT4086\t\n\tE-MAIL ADDRESS\t\n901\tCONF\t\n902\tCONF\t\n",
+        "Readme.txt": "This file contains data from Call Reports received and processed by the FFIEC CDR\n",
+    }
+    with zipfile.ZipFile(bulk, "w") as z:
+        for name, text in files.items():
+            z.writestr(name, text)
+    r = await call("ffiec_import_bulk", {"path": str(bulk)})
+    check("real-shaped bulk ZIP imports in one call", r.get("status") == "complete"
+          and r["periods"] == {"03/31/2026": 2} and r["skipped_files"] == ["Readme.txt"], r)
+    r = await call("ffiec_call_report", {"fi_id": "901", "period": "2026Q1"})
+    vals = {i["mdrm"]: (i["value"], i["schedule"]) for i in r["items"]}
+    check("real-shaped values: RCON, first schedule wins, booleans and CONF kept, blanks dropped",
+          r["source"] == "bulk import" and vals.get("RCON2170") == ("85000", "RC") and vals.get("RCON2200") == ("71000", "RC")
+          and vals.get("RIAD4340") == ("190", "RI") and vals.get("RCON6979") == ("false", "NARR")
+          and vals.get("TEXT4086") == ("CONF", "CI") and "RCFD2170" not in vals and "TEXT6980" not in vals, vals)
+    r = await call("ffiec_call_report", {"fi_id": "902", "period": "2026Q1", "items": ["RCFD2170", "RIAD4340", "TEXT6980"]})
+    vals = {i["mdrm"]: i["value"] for i in r["items"]}
+    check("real-shaped 031 bank: RCFD items and narrative text",
+          vals == {"RCFD2170": "3900000", "RIAD4340": "15000", "TEXT6980": "No comment."}, vals)
+    r = await call("ffiec_call_report", {"fi_id": "7002", "period": "2026Q1", "id_type": "FDICCertNumber", "items": ["2200"]})
+    check("real-shaped panel: found by FDIC cert", r.get("source") == "bulk import"
+          and r["items"][0]["value"] == "2500000", r)
+
     h = calls[0][1]
     check("auth headers", h["Authentication"] == "Bearer test-token" and h["UserID"] == "tester", h)
     print(f"\n{len(failures)} failure(s)")

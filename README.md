@@ -109,6 +109,7 @@ Optional extras: per-bank Detail sheets for any schedule (each row flagged YTD o
 | `HTTP 403 ... quota` | FFIEC allows about 2,500 calls per hour per account. Wait for the next hour. |
 | `No content: facsimile not found` | The bank did not file for that period (new, merged, or not yet filed). |
 | An export or trend returns `status: in_progress` | Normal for big requests. Claude calls the tool again automatically; downloads are cached, so each call picks up where the last stopped. If Claude stops, say "continue the export". |
+| "database is locked" | The download folder is probably synced by OneDrive (or similar). Set Download Folder to a folder outside OneDrive, for example `C:\FFIEC`. |
 | Extension fails to start | Check the log: Settings > Developer (or on Windows `%LOCALAPPDATA%\Claude\Logs\mcp-server-FFIEC CDR (Call Reports & UBPR).log`) and send it to the maintainer. |
 
 Large exports download in stages of about 40 seconds so Claude Desktop does not time out; each stage resumes from the cache. A 3-bank, 4-quarter export with detail and UBPR is about 30 filings. The extension tracks FFIEC's hourly limit (about 2,500 calls) and pauses before hitting it. Downloaded filings are cached in the download folder, so repeat requests are fast and free; amended filings are detected and downloaded again (see "Local cache and amended filings").
@@ -129,7 +130,7 @@ For peer work across many banks, load a whole quarter from FFIEC's bulk file ins
 2. Choose **Call Reports -- Single Period**, the quarter, and **Tab Delimited**, then download the ZIP.
 3. Ask Claude: "Import the FFIEC bulk file at C:\Users\me\Downloads\FFIEC CDR Call Bulk All Schedules 06302025.zip".
 
-A quarter takes a minute or two over a few tool calls, and adds roughly 30 to 80 MB to the database. After that, Call Report tools, summaries, trends, and Excel exports read those banks locally. The amendment check above covers bulk-loaded banks too. Line numbers are blank for bulk-loaded items, and Detail sheets still download one XBRL file per bank for the YTD/period-end flags. UBPR data is not included in the bulk import; it still comes from the API.
+A quarter (about 4,300 banks) typically loads in one tool call of 10 to 30 seconds, and adds about 35 MB to the database; on a slow machine it may take a second call. After that, Call Report tools, summaries, trends, and Excel exports read those banks locally. The amendment check above covers bulk-loaded banks too. Line numbers are blank for bulk-loaded items, and Detail sheets still download one XBRL file per bank for the YTD/period-end flags. UBPR data is not included in the bulk import; it still comes from the API.
 
 ## Data sources
 

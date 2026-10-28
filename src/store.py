@@ -43,7 +43,7 @@ try:
 except Exception:  # no tz database (some Windows Pythons): EST, which errs toward treating copies as stale
     EASTERN = timezone(timedelta(hours=-5))
 
-MDRM_RE = re.compile(r"^[A-Z]{4}[A-Z0-9]{4}$")
+MDRM_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{6}$")  # mnemonics can hold digits: TE01N528 (RC-M websites)
 
 
 def eastern_ts(s: Any) -> float | None:
@@ -315,7 +315,7 @@ def import_bulk(store: Store, src: Path, time_budget: float) -> dict:
                     for j, code in cols:
                         if j < len(row):
                             v = row[j].strip().strip('"')
-                            if v != "":
+                            if v not in ("", "CONF"):  # CONF: confidential; the API leaves these blank
                                 items.append((code, v, sched))
                     batch.append((period, rssd, json.dumps(items, separators=(",", ":"))))
                 stage.executemany("INSERT INTO stage VALUES (?,?,?)", batch)

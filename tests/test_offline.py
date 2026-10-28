@@ -297,7 +297,9 @@ async def main():
             "IDRSSD\tRCON6979\tTEXT6980\t\n\tNO COMMENT-BK MANAGEMENT STATE\tBANK MANAGEMENT STATEMENT\t\n"
             "901\tfalse\t\t\n902\ttrue\tNo comment.\t\n",
         "FFIEC CDR Call Schedule CI 03312026.txt":
-            "IDRSSD\tTEXT4086\t\n\tE-MAIL ADDRESS\t\n901\tCONF\t\n902\tCONF\t\n",
+            "IDRSSD\tTEXT4086\tRCONK663\t\n\tE-MAIL ADDRESS\tCONFIDENTIAL ITEM\t\n901\tCONF\tCONF\t\n902\tCONF\t12\t\n",
+        "FFIEC CDR Call Schedule RCM 03312026.txt":
+            "IDRSSD\tTE01N528\tTE01N529\t\n\tURL\tTRADE NAME\t\n901\t\t\t\n902\twww.example.com\tExample\t\n",
         "Readme.txt": "This file contains data from Call Reports received and processed by the FFIEC CDR\n",
     }
     with zipfile.ZipFile(bulk, "w") as z:
@@ -308,14 +310,16 @@ async def main():
           and r["periods"] == {"03/31/2026": 2} and r["skipped_files"] == ["Readme.txt"], r)
     r = await call("ffiec_call_report", {"fi_id": "901", "period": "2026Q1"})
     vals = {i["mdrm"]: (i["value"], i["schedule"]) for i in r["items"]}
-    check("real-shaped values: RCON, first schedule wins, booleans and CONF kept, blanks dropped",
+    check("real-shaped values: RCON, first schedule wins, booleans kept, blanks and CONF dropped",
           r["source"] == "bulk import" and vals.get("RCON2170") == ("85000", "RC") and vals.get("RCON2200") == ("71000", "RC")
           and vals.get("RIAD4340") == ("190", "RI") and vals.get("RCON6979") == ("false", "NARR")
-          and vals.get("TEXT4086") == ("CONF", "CI") and "RCFD2170" not in vals and "TEXT6980" not in vals, vals)
-    r = await call("ffiec_call_report", {"fi_id": "902", "period": "2026Q1", "items": ["RCFD2170", "RIAD4340", "TEXT6980"]})
+          and not {"TEXT4086", "RCONK663", "RCFD2170", "TEXT6980", "TE01N528"} & set(vals), vals)
+    r = await call("ffiec_call_report", {"fi_id": "902", "period": "2026Q1",
+                                         "items": ["RCFD2170", "RIAD4340", "TEXT6980", "RCONK663", "TE01N528", "TE01N529"]})
     vals = {i["mdrm"]: i["value"] for i in r["items"]}
-    check("real-shaped 031 bank: RCFD items and narrative text",
-          vals == {"RCFD2170": "3900000", "RIAD4340": "15000", "TEXT6980": "No comment."}, vals)
+    check("real-shaped 031 bank: RCFD items, narrative text, TE01 mnemonics",
+          vals == {"RCFD2170": "3900000", "RIAD4340": "15000", "TEXT6980": "No comment.", "RCONK663": "12",
+                   "TE01N528": "www.example.com", "TE01N529": "Example"}, vals)
     r = await call("ffiec_call_report", {"fi_id": "7002", "period": "2026Q1", "id_type": "FDICCertNumber", "items": ["2200"]})
     check("real-shaped panel: found by FDIC cert", r.get("source") == "bulk import"
           and r["items"][0]["value"] == "2500000", r)

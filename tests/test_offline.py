@@ -170,7 +170,8 @@ async def main():
     r = await call("ffiec_call_report", {"fi_id": "480228", "period": period, "items": ["RIAD4340"]})
     check("cached before amendment", r["items"][0]["value"] == "3000", r)
     YTD[period] = (3500, 10500)  # the bank amends its net income
-    stamp = datetime.fromtimestamp(time.time() + 3600, EASTERN).strftime("%-m/%-d/%Y %-I:%M:%S %p")
+    t = datetime.fromtimestamp(time.time() + 3600, EASTERN)
+    stamp = f"{t.month}/{t.day}/{t.year} {t.hour % 12 or 12}:{t:%M:%S %p}"  # no %-m: not on Windows
     SUBMISSIONS.append({"ID_RSSD": 480228, "DateTime": stamp})
     n = len(calls)
     r = await call("ffiec_call_report", {"fi_id": "480228", "period": period, "items": ["RIAD4340"]})
